@@ -1,0 +1,303 @@
+# (c) 2020 Amazon Web Services, Inc. or its affiliates. All Rights Reserved. This AWS Content
+# is provided subject to the terms of the AWS Customer Agreement available at
+# https://aws.amazon.com/agreement/ or other written agreement between Customer
+# and Amazon Web Services, Inc.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Used to deploy the VPC as a Service Catalog Product Helper destined for the Central Helper Account.
+
+###########
+
+# Metadata #
+
+###########
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Lambda Configuration"
+        Parameters:
+          - pLambdaCodeBucket
+          - pLambdaCodeKey
+          - pLambdaSubnetIDs
+          - pLambdaSecurityGroupIDs
+          - pLambdaHandler
+      - Label:
+          default: "Infoblox Configuration"
+        Parameters:
+          - pSetupExtensibleAttribute
+          - pNetworkContainers
+          - pInfobloxUrl
+          - pInfobloxSecretName
+          - pInfobloxUsername
+          - pNetworkView
+      - Label:
+          default: "Lambda Environment Variables"
+        Parameters:
+          - pNetworkSize
+      - Label:
+          default: "SNS Topic Configuration"
+        Parameters:
+          - pSNSTopicName
+      - Label:
+          default: "Organization Configuration"
+        Parameters:
+          - pOrganizationID
+
+    ParameterLabels:
+      pLambdaCodeBucket:
+        default: "Lambda Code Bucket"
+      pLambdaCodeKey:
+        default: "Lambda Code Key"
+      pLambdaSubnetIDs:
+        default: "Private Lambda Subnet IDs"
+      pLambdaSecurityGroupIDs:
+        default: "Lambda Security Group IDs"
+      pLambdaHandler:
+        default: "Lambda Handler"
+      pSetupExtensibleAttribute:
+        default: "Setup Infoblox Extensible Attribute"
+      pNetworkContainers:
+        default: "Infoblox Network Containers"
+      pInfobloxUrl:
+        default: "Infoblox URL"
+      pInfobloxSecretName:
+        default: "Infoblox Secret Name"
+      pInfobloxUsername:
+        default: "Infoblox Username"
+      pNetworkView:
+        default: "Infoblox Network View"
+      pNetworkSize:
+        default: "Default CIDR Block Size"
+      pSNSTopicName:
+        default: "SNS Topic Name"
+      pOrganizationID:
+        default: "Organization ID"
+
+###########
+
+# Parameters #
+
+###########
+
+Parameters:
+  pLambdaCodeBucket:
+    Description: "Bucket location where the lambda function code is hosted"
+    Type: String
+    Default: scproducthelpercode-749165261179
+  pLambdaCodeKey:
+    Description: "Key location where the lambda function code is hosted"
+    Type: String
+    Default: VPCasSCProductHelper.py.zip
+  pLambdaSubnetIDs:
+    Description: "Private Subnets used by the Lambda Function"
+    Type: List<AWS::EC2::Subnet::Id>
+    ConstraintDescription: "must be list of EC2 subnet ids"
+  pLambdaSecurityGroupIDs:
+    Description: "Security groups for the Lambda function"
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    ConstraintDescription: "must be list of EC2 security group ids"
+  pLambdaHandler:
+    Description: "Lambda Handler in the format of Filename.Functionname"
+    Type: String
+    Default: VPCasSCProductHelper.lambda_handler
+  pSetupExtensibleAttribute:
+    Description: "Selecting 'Yes' will setup the required extensible attributes (Region, Cloud Account ID, Cloudformation Stack ID) in the Infoblox Grid. This may overwrite 'Restricted to Objects' for certain extensible attributes. Select 'No' to manually setup extensible attributes."
+    Type: String
+    Default: Yes
+    AllowedValues:
+      - Yes
+      - No
+  pNetworkContainers:
+    Description: "Comma delimited list of IPv4 Networks that will be designated as network containers for all new VPC Cidr Block Requests. e.g. \"192.168.9.0/24,192.168.12.0/24\" without quotation marks. Leave empty if you would like to set these up manually."
+    Type: String
+    Default: ''
+  pInfobloxUrl:
+    Description: "URL of the Infoblox Grid"
+    Type: String
+    Default: '13.52.31.23'
+  pInfobloxSecretName:
+    Description: "Location of where the Infoblox Password is stored in AWS Secrets Manager. The password must be updated in secrets manager manually after this template completes."
+    Type: String
+    Default: '/automationParams/InfobloxCredential'
+  pInfobloxUsername:
+    Description: "Username of the service account that has read/write access to the specified network view in Infoblox"
+    Type: String
+    Default: 'admin'
+  pNetworkView:
+    Description: "Network view in the Infoblox Grid where AWS CIDR Range is located"
+    Type: String
+    Default: default
+  pNetworkSize:
+    Description: "Size of new networks allocated in the Infoblox Grid when a customer requests a new VPC CIDR Block"
+    Type: String
+    Default: '26'
+  pSNSTopicName:
+    Description: "Name of the SNS topic that aggregates requests from all child account custom resources requesting or deleting a VPC"
+    Type: String
+    Default: VPCSCProductHelper
+  pOrganizationID:
+    Description: "Organization ID for receiving requests from child accounts"
+    Type: String
+    Default: "o-72i83bd2bx"
+
+###########
+
+# Resources #
+
+###########
+
+Resources:
+  rInfobloxNetworkContainerCustomResource:
+    Type: 'Custom::InfobloxNetworkContainer'
+    Properties:
+      ServiceToken: !Ref rVPCasSCProductHelperLambda
+      CIDRBlockList: !Ref pNetworkContainers
+      SetupExtensibleAttributes: !Ref pSetupExtensibleAttribute
+
+  rVPCasSCProductHelperLambda:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: !Ref pLambdaHandler
+      Runtime: python3.7
+      CodeUri:
+        Bucket: !Ref pLambdaCodeBucket
+        Key: !Ref pLambdaCodeKey
+      Description: 'Used to process requests for VPC CIDR Block ranges as part of the SC Product'
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt rLambdaRole.Arn
+      Events:
+        SNS1:
+          Type: SNS
+          Properties:
+            Topic:
+              Ref: rSNSTopic
+      Environment:
+        Variables:
+          INFOBLOX_SECRET_NAME: !Ref pInfobloxSecretName
+          INFOBLOX_URL: !Ref pInfobloxUrl
+          NETWORK_VIEW: !Ref pNetworkView
+          NETWORK_SIZE: !Ref pNetworkSize
+          INFOBLOX_USERNAME: !Ref pInfobloxUsername
+      VpcConfig:
+        SubnetIds: !Ref pLambdaSubnetIDs
+        SecurityGroupIds: !Ref pLambdaSecurityGroupIDs
+
+
+  rLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+      Policies:
+        - PolicyName: inline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${pInfobloxSecretName}*'
+  
+  rSNSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Ref pSNSTopicName
+      KmsMasterKeyId: !Ref rKMSMasterKey
+
+  rSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties: 
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: allow-publish-from-organization-accounts
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - sns:Publish
+            Resource: !Ref rSNSTopic
+            Condition:
+              StringEquals:
+                 aws:PrincipalOrgID: !Ref pOrganizationID
+      Topics: 
+        - !Ref rSNSTopic
+
+  rSecretsManagerSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Ref pInfobloxSecretName
+      Description: Used by the VPC as a SC Product to access the Infoblox Grid Master
+      SecretString: 'JUNK DATA THAT NEEDS TO BE MANUALLY CONFIGURED'
+      KmsKeyId: !Ref rKMSMasterKey
+
+  rKMSMasterKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for VPC as a Service Catalog Product
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-policy
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+          Action:
+            - "kms:*"
+          Resource: '*'
+        - Sid: Allow access through AWS Secrets Manager for all principals in the account that are authorized to use AWS Secrets Manager
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+            - "kms:Encrypt"
+            - "kms:Decrypt"
+            - "kms:ReEncrypt*"
+            - "kms:GenerateDataKey*"
+            - "kms:CreateGrant"
+            - "kms:DescribeKey"
+          Resource: '*'
+          Condition:
+            StringEquals:
+              "kms:ViaService": !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+              "kms:CallerAccount": !Sub "${AWS::AccountId}"
+        - Sid: Allow access for Lambda Function
+          Effect: Allow
+          Principal:
+            AWS: !GetAtt rLambdaRole.Arn
+          Action: kms:Decrypt
+          Resource: '*'
+        - Sid: Allow access for Key User (SNS IAM User)
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+          - kms:GenerateDataKey*
+          - kms:Decrypt
+          Resource: '*'
+          Condition:
+            StringEquals:
+              aws:PrincipalOrgID: !Ref pOrganizationID
+        - Sid: Allow access for Key User (SNS Service Principal)
+          Effect: Allow
+          Principal:
+            Service: sns.amazonaws.com
+          Action:
+          - kms:GenerateDataKey*
+          - kms:Decrypt
+          Resource: '*'

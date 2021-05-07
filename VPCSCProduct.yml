@@ -1,0 +1,279 @@
+# (c) 2020 Amazon Web Services, Inc. or its affiliates. All Rights Reserved. This AWS Content
+# is provided subject to the terms of the AWS Customer Agreement available at
+# https://aws.amazon.com/agreement/ or other written agreement between Customer
+# and Amazon Web Services, Inc.
+
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Landing Zone - Networking
+
+###################################################
+#
+# CloudFormation Interface Metadata
+#
+###################################################
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    - Label:
+        default: Amazon Virtual Private Cloud
+      Parameters:
+        - pAvailabilityZone1
+        - pAvailabilityZone2
+    - Label:
+        default: Central Infrastructure Configuration
+      Parameters:
+      - pCentralAccount
+
+    ParameterLabels:
+      pAvailabilityZone1:
+        default: Availability Zone 1
+      pAvailabilityZone2:
+        default: Availability Zone 2
+      pCentralAccount:
+        default: Central Account
+
+
+
+###################################################
+#
+# Template Parameter Definitions
+#
+###################################################
+Parameters:
+  # Availability Zone for Subnet 1
+  pAvailabilityZone1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-gov-east-1a
+    Description: First availability zone to create subnets
+
+  # Availability Zone for Subnet 2
+  pAvailabilityZone2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-gov-east-1b
+    Description: Second availability zone to create subnets
+  # Central Account
+  pCentralAccount:
+    Type: String
+    Default: 1234567890
+    Description: Central Account where VPCSCProductHelper.yml is deployed
+
+
+#####################################################
+# Custom Resources
+#####################################################
+Resources:
+
+  # Retreives VPC CIDR Block from Infoblox
+  rVPCCIDRBlockCR:
+    Type: 'Custom::VPCCIDRBlockCR'
+    Version: '1.0'
+    DependsOn: rPrerequisiteCheckCustomResource
+    Properties:
+      ServiceToken: !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${pCentralAccount}:VPCSCProductHelper
+
+  #Prerequisite checker custom resource
+  rPrerequisiteCheckCustomResource:
+    Type: Custom::PrerequisiteCheck
+    DependsOn:
+      - rPrerequisiteCheckLambdaRole
+      - rPrerequisiteCheckLambdaPolicy
+    Properties:
+      ServiceToken: !GetAtt rPrerequisiteCheckLambda.Arn
+  
+  rPrerequisiteCheckLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - 'sts:AssumeRole'
+
+  rPrerequisiteCheckLambdaPolicy: 
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AllowDescribeEC2Permissions
+          Effect: Allow
+          Action:
+            - ec2:DescribeVPCs
+            - ec2:DescribeTransitGateways
+          Resource: "*"
+        - Sid: PermissionsforCloudWatchLogs
+          Effect: Allow
+          Action: 
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+      Roles:
+        - !Ref rPrerequisiteCheckLambdaRole
+
+  rPrerequisiteCheckLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Description: 'Custom Resource for VPC as a SC Product'
+      FunctionName: lzPrerequisiteCheckLambda
+      Role: !GetAtt [rPrerequisiteCheckLambdaRole, Arn]
+      Runtime: python3.7
+      Timeout: 180
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import logging
+          import cfnresponse
+          import boto3
+
+          def handler(event, context):
+              logger = logging.getLogger()
+              logger.setLevel(logging.INFO)
+              try:
+                  if event['RequestType'] == 'Delete':
+                      logger.info('Received Delete! No Op!')
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  if event['RequestType'] == 'Update':
+                      logger.info('Received Update! No Op!')
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  client = boto3.client('ec2')
+                  response = client.describe_transit_gateways()
+                  if len(response['TransitGateways']) != 1:
+                      logger.exception("This account does not have access to only a single Transit Gateway!")
+                      raise Exception("This account does not have access to only a single Transit Gateway!")
+                  
+                  logger.info('It worked!')
+                  responseData = {'TransitGatewayID' : response['TransitGateways'][0]['TransitGatewayId']}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              except Exception:
+                  logger.exception('Signaling failure to CloudFormation.')
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+      
+
+
+  #####################################################
+  # VPC
+  #####################################################
+
+  # The VPC itself
+  rVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !GetAtt rVPCCIDRBlockCR.CIDRBlock
+      Tags:
+        -
+          Key: Name
+          Value: !Sub ${AWS::AccountId}-vpc
+
+  # Private Subnet 1
+  rPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref pAvailabilityZone1
+      CidrBlock: !GetAtt rVPCCIDRBlockCR.Subnet1
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref rVpc
+      Tags:
+      -
+        Key: Name
+        Value: !Sub ${AWS::AccountId}-sbnet1
+
+  # Private Subnet 2
+  rPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref pAvailabilityZone2
+      CidrBlock: !GetAtt rVPCCIDRBlockCR.Subnet2
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref rVpc
+      Tags:
+      -
+        Key: Name
+        Value: !Sub ${AWS::AccountId}-sbnet2
+
+  #####################################################
+  # Network routing
+  #####################################################
+
+  # Route table
+  rPrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVpc
+      Tags:
+      -
+        Key: Name
+        Value: !Sub ${AWS::AccountId}-rtb1
+
+  # Associate route table with Private Subnet 1
+  rPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rPrivateSubnetRouteTable
+      SubnetId: !Ref rPrivateSubnet1
+
+  # Associate route table with Private Subnet 2
+  rPrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rPrivateSubnetRouteTable
+      SubnetId: !Ref rPrivateSubnet2
+
+  #####################################################
+  # Transit Gateway
+  #####################################################
+  # Specifies route to the TGW
+  rTGWRoute:
+    Type: AWS::EC2::Route
+    DependsOn: rTGWAttach
+    Properties: 
+      DestinationCidrBlock: '0.0.0.0/0'
+      RouteTableId: !Ref rPrivateSubnetRouteTable
+      TransitGatewayId: !GetAtt rPrerequisiteCheckCustomResource.TransitGatewayID
+
+  # Attaches VPC to TGW
+  rTGWAttach:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      SubnetIds: 
+        - !Ref rPrivateSubnet1
+        - !Ref rPrivateSubnet2
+      Tags: 
+      - 
+        Key: Name
+        Value: !Sub ${AWS::AccountId}-tgw
+      TransitGatewayId: !GetAtt rPrerequisiteCheckCustomResource.TransitGatewayID
+      VpcId: !Ref rVpc
+
+###################################################
+#
+# Template Outputs
+#
+###################################################
+Outputs:
+  # Provides VPC ID
+  oVpc:
+    Description: VPC ID
+    Value: !Ref rVpc
+  # Provides Private Subnet 2
+  oPrivateSubnet1:
+    Description: Private Subnet 1
+    Value: !Ref rPrivateSubnet1
+  # Provides Private Subnet 2
+  oPrivateSubnet2:
+    Description: Private Subnet 2
+    Value: !Ref rPrivateSubnet2
+  # Provides Route Table
+  oPrivateSubnetRouteTable:
+    Description: VPC Route Table
+    Value: !Ref rPrivateSubnetRouteTable
